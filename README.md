@@ -22,105 +22,119 @@ Execute the C Program for the desired output.
 
 ## Write a C program that illustrates two processes communicating using shared memory.
 ```
-/*
- * sem.c - Producer-Consumer using Semaphores
- */
-#include <stdio.h>      
-#include <stdlib.h>     
-#include <unistd.h>     
-#include <sys/types.h>  
-#include <sys/ipc.h>    
-#include <sys/sem.h>    
-#include <sys/wait.h>   
-#include <time.h>      
+//sem.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/shm.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
-#define NUM_LOOPS 10  // Number of producer-consumer cycles
+#define TEXT_SZ 2048  // Shared memory size
 
-// Define union semun if not already available
-union semun {
-    int val;               
-    struct semid_ds *buf;  
-    unsigned short int *array; 
-    struct seminfo *__buf;
+struct shared_use_st {
+    int written;  
+    char some_text[TEXT_SZ];
 };
 
-// Function to wait (P operation) on semaphore
-void wait_semaphore(int sem_set_id) {
-    struct sembuf sem_op;
-    sem_op.sem_num = 0;
-    sem_op.sem_op = -1;  // Decrease semaphore value (Wait)
- sem_op.sem_flg = 0;
-    semop(sem_set_id, &sem_op, 1);
-}
-
-// Function to signal (V operation) on semaphore
-void signal_semaphore(int sem_set_id) {
-    struct sembuf sem_op;
-    sem_op.sem_num = 0;
-    sem_op.sem_op = 1;  // Increase semaphore value (Signal)
- sem_op.sem_flg = 0;
-    semop(sem_set_id, &sem_op, 1);
-}
-
 int main() {
-    int sem_set_id;
-    union semun sem_val;
-    int child_pid;
+    int shmid;
+    void *shared_memory = (void *)0;
+    struct shared_use_st *shared_stuff;
 
-    // Create a semaphore set with one semaphore
-    sem_set_id = semget(IPC_PRIVATE, 1, 0600);
-    if (sem_set_id == -1) {
-        perror("semget");
-        exit(1);
+    // Create shared memory
+    shmid = shmget((key_t)1234, sizeof(struct shared_use_st), 0666 | IPC_CREAT);
+    if (shmid == -1) {
+        fprintf(stderr, "shmget failed\n");
+        exit(EXIT_FAILURE);
+    }
+    
+    // Print the shared memory ID in a predictable format
+    printf("Shared memory id = %d\n", shmid);
+    
+    // Attach to shared memory
+    shared_memory = shmat(shmid, (void *)0, 0);
+    if (shared_memory == (void *)-1) {
+        fprintf(stderr, "shmat failed\n");
+        exit(EXIT_FAILURE);
+    }
+    printf("Memory attached at %p\n", shared_memory);
+    
+    shared_stuff = (struct shared_use_st *)shared_memory;
+    shared_stuff->written = 0;
+
+    pid_t pid = fork();
+    
+    if (pid < 0) {
+        fprintf(stderr, "Fork failed\n");
+        exit(EXIT_FAILURE);
     }
 
-    printf("semaphore set created, semaphore set id '%d'.\n", sem_set_id);
+    if (pid == 0) {  // Child process (Consumer)
+        while (1) {
+            while (shared_stuff->written == 0) {
+                sleep(1); // Wait for producer
+            }
 
-    // Initialize semaphore to 0 (Consumer must wait for Producer)
-    sem_val.val = 0;
-    if (semctl(sem_set_id, 0, SETVAL, sem_val) == -1) {
-        perror("semctl");
-        exit(1);
-    }
+            printf("Consumer received: %s", shared_stuff->some_text);
 
-    // Fork a child process
-    child_pid = fork();
-if (child_pid < 0) {
-        perror("fork");
-        exit(1);
-    }
+            if (strncmp(shared_stuff->some_text, "end", 3) == 0) {
+                break;
+            }
 
-    if (child_pid == 0) {  
-        // CHILD PROCESS: Consumer
-        for (int i = 0; i < NUM_LOOPS; i++) {
-            wait_semaphore(sem_set_id);  // Wait for producer
-            printf("consumer: '%d'\n", i);
-            fflush(stdout);
+            shared_stuff->written = 0; // Reset for producer
         }
-        exit(0);
-    } else {  
-        // PARENT PROCESS: Producer
-        for (int i = 0; i < NUM_LOOPS; i++) {
-            printf("producer: '%d'\n", i);
-            fflush(stdout);
-            signal_semaphore(sem_set_id);  // Signal consumer
-            usleep(500000); // Sleep to allow consumer to process
+
+        // Detach shared memory
+        if (shmdt(shared_memory) == -1) {
+            fprintf(stderr, "shmdt failed\n");
+            exit(EXIT_FAILURE);
+        }
+        exit(EXIT_SUCCESS);
+    } else {  // Parent process (Producer)
+        char buffer[TEXT_SZ];
+
+        while (1) {
+            printf("Enter Some Text: ");
+            fgets(buffer, TEXT_SZ, stdin);
+
+            strncpy(shared_stuff->some_text, buffer, TEXT_SZ);
+            shared_stuff->written = 1;
+            printf(shared_stuff->some_text);
+
+            if (strncmp(buffer, "end", 3) == 0) {
+                break;
+            }
+
+            while (shared_stuff->written == 1) {
+                sleep(1); // Wait for consumer
+            }
         }
 
-        // Wait for child to finish
+        // Wait for child process (consumer) to finish
         wait(NULL);
 
-        // Remove the semaphore set
- semctl(sem_set_id, 0, IPC_RMID, sem_val);
-        printf("Semaphore removed.\n");
-    }
+        // Detach and remove shared memory
+        if (shmdt(shared_memory) == -1) {
+            fprintf(stderr, "shmdt failed\n");
+            exit(EXIT_FAILURE);
+        }
+        
+        if (shmctl(shmid, IPC_RMID, 0) == -1) {
+            fprintf(stderr, "shmctl failed\n");
+            exit(EXIT_FAILURE);
+        }
 
-    return 0;
+        exit(EXIT_SUCCESS);
+    }
 }
+
 ```
 
 ## OUTPUT
-<img width="645" height="669" alt="image" src="https://github.com/user-attachments/assets/e312fe6e-6853-4455-98d1-7309542c131c" />
+
+<img width="639" height="658" alt="image" src="https://github.com/user-attachments/assets/e3053fb6-05b1-4275-bc80-3eae552eec60" />
 
 
 # RESULT:
